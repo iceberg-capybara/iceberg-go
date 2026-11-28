@@ -41,7 +41,47 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// bboxMutationFilterVisitor finds spatial predicates that are safe for file
+// pruning but have no exact row-level evaluator in iceberg-go.
+type bboxMutationFilterVisitor struct{}
+
+func (bboxMutationFilterVisitor) VisitTrue() bool                { return false }
+func (bboxMutationFilterVisitor) VisitFalse() bool               { return false }
+func (bboxMutationFilterVisitor) VisitNot(child bool) bool       { return child }
+func (bboxMutationFilterVisitor) VisitAnd(left, right bool) bool { return left || right }
+func (bboxMutationFilterVisitor) VisitOr(left, right bool) bool  { return left || right }
+func (bboxMutationFilterVisitor) VisitUnbound(pred iceberg.UnboundPredicate) bool {
+	return isBBoxMutationPredicate(pred.Op())
+}
+
+func (bboxMutationFilterVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
+	return isBBoxMutationPredicate(pred.Op())
+}
+
+func isBBoxMutationPredicate(op iceberg.Operation) bool {
+	return op == iceberg.OpBBoxIntersects || op == iceberg.OpBBoxNotIntersects
+}
+
+func rejectBBoxMutationFilter(filter iceberg.BooleanExpression) error {
+	if filter == nil {
+		return nil
+	}
+	hasBBox, err := iceberg.VisitExpr(filter, bboxMutationFilterVisitor{})
+	if err != nil {
+		return fmt.Errorf("check row mutation filter: %w", err)
+	}
+	if hasBBox {
+		return fmt.Errorf("%w: bbox predicates are only supported for file pruning, not row-level deletes or overwrites", iceberg.ErrNotImplemented)
+	}
+
+	return nil
+}
+
 func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, io.WriteFileIO, error) {
+	if err := rejectBBoxMutationFilter(filter); err != nil {
+		return nil, nil, err
+	}
+
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, nil, err
@@ -132,6 +172,10 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 }
 
 func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+	if err := rejectBBoxMutationFilter(filter); err != nil {
+		return nil, err
+	}
+
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
