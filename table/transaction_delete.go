@@ -1153,6 +1153,9 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	if err != nil {
 		return nil, err
 	}
+	// The snapshot selects files on the target branch. The mutation predicate
+	// uses the current schema, which can have columns newer than that snapshot.
+	scan.useSnapshotSchema = new(false)
 	planned, err := scan.PlanFiles(ctx)
 	if err != nil {
 		return nil, err

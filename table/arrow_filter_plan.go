@@ -455,3 +455,37 @@ func (extractStripper) VisitBound(pred iceberg.BoundPredicate) strippedResult {
 
 	return strippedResult{expr: pred}
 }
+
+// missingNestedInitialDefaultVisitor finds predicates over historical nested
+// fields that must be materialized before row filtering. A missing child has
+// its initial default only when its parent struct is present.
+type missingNestedInitialDefaultVisitor struct {
+	fileSchema *iceberg.Schema
+}
+
+func (missingNestedInitialDefaultVisitor) VisitTrue() bool                { return false }
+func (missingNestedInitialDefaultVisitor) VisitFalse() bool               { return false }
+func (missingNestedInitialDefaultVisitor) VisitNot(child bool) bool       { return child }
+func (missingNestedInitialDefaultVisitor) VisitAnd(left, right bool) bool { return left || right }
+func (missingNestedInitialDefaultVisitor) VisitOr(left, right bool) bool  { return left || right }
+func (missingNestedInitialDefaultVisitor) VisitUnbound(iceberg.UnboundPredicate) bool {
+	return false
+}
+
+func (v missingNestedInitialDefaultVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
+	ref := pred.Ref()
+	if len(ref.PosPath()) <= 1 || ref.Field().InitialDefault == nil {
+		return false
+	}
+	_, found := v.fileSchema.FindFieldByID(ref.Field().ID)
+
+	return !found
+}
+
+func filterHasMissingNestedInitialDefault(filter iceberg.BooleanExpression, fileSchema *iceberg.Schema) (bool, error) {
+	if filter == nil || fileSchema == nil {
+		return false, nil
+	}
+
+	return iceberg.VisitExpr(filter, missingNestedInitialDefaultVisitor{fileSchema: fileSchema})
+}

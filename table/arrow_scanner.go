@@ -1911,6 +1911,23 @@ func (as *arrowScan) emptyBatchSchema() (*arrow.Schema, error) {
 	})
 }
 
+// fullPhysicalReadSchema is a conservative fallback for nested initial-default
+// filters. A pruned projection might omit every old child of the containing
+// struct, losing the parent's null bitmap. Reading the complete physical
+// schema preserves that validity so logical defaults can be applied correctly.
+func fullPhysicalReadSchema(rdr tblutils.FileReader, invariants *arrowScanInvariants) (*iceberg.Schema, error) {
+	physical, err := rdr.Schema()
+	if err != nil {
+		return nil, err
+	}
+
+	return ArrowSchemaToIcebergWithOptions(physical, ArrowToIcebergOptions{
+		NameMapping:     invariants.nameMapping,
+		TableSchema:     invariants.tableSchema,
+		TableProperties: invariants.tableProperties,
+	})
+}
+
 func (as *arrowScan) prepareToRead(
 	ctx context.Context,
 	file iceberg.DataFile,
@@ -2868,7 +2885,18 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
-	if task.Value.Residual == nil {
+	needsLogicalDefaultFilter, err := filterHasMissingNestedInitialDefault(rowFilter, iceSchema)
+	if err != nil {
+		return err
+	}
+	if needsLogicalDefaultFilter {
+		iceSchema, err = fullPhysicalReadSchema(rdr, invariants)
+		if err != nil {
+			return err
+		}
+		colIndices = nil
+	}
+	if task.Value.Residual == nil && !needsLogicalDefaultFilter {
 		filterPlans, err = as.cachedFileFilterPlans(
 			iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
 		if err != nil {
@@ -2985,7 +3013,24 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		}
 	}
 
-	if filterPlans != nil {
+	var logicalDefaultSchema *iceberg.Schema
+	if needsLogicalDefaultFilter {
+		logicalDefaultSchema = as.filterSchema
+		if logicalDefaultSchema == nil {
+			logicalDefaultSchema = as.scanSchema
+		}
+		if logicalDefaultSchema == nil {
+			return fmt.Errorf("%w: missing logical schema for nested initial-default filter", iceberg.ErrInvalidSchema)
+		}
+		// Keep synthesized or stored lineage columns through this intermediate
+		// projection, even when they are not part of the table schema.
+		_, hasRowID := readSchema.FindFieldByID(iceberg.RowIDFieldID)
+		_, hasSeq := readSchema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
+		if hasRowID || hasSeq {
+			logicalDefaultSchema = iceberg.SchemaWithRowLineageColumns(logicalDefaultSchema, hasRowID, hasSeq)
+		}
+		filterFunc, dropFile, err = as.getRecordFilter(ctx, logicalDefaultSchema, rowFilter)
+	} else if filterPlans != nil {
 		filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
 	} else {
 		filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, rowFilter)
@@ -3007,6 +3052,22 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 
+	if needsLogicalDefaultFilter {
+		// Project the historical file into the logical schema before evaluating
+		// the predicate. A nested default applies beneath a present parent, but
+		// must remain null beneath a null parent. Translating the missing child
+		// into a file-wide constant loses that distinction.
+		inputSchema, outputSchema := readSchema, logicalDefaultSchema
+		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+			defer r.Release()
+
+			return ToRequestedSchema(ctx, outputSchema, inputSchema, r, SchemaOptions{
+				UseLargeTypes:   as.useLargeTypes,
+				TableProperties: invariants.tableProperties,
+			})
+		})
+		readSchema = outputSchema
+	}
 	if filterFunc != nil {
 		pipeline = append(pipeline, filterFunc)
 	}
@@ -3067,10 +3128,23 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		}
 	}
 
-	filterPlans, err = as.cachedFileFilterPlans(
-		iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
+	needsLogicalDefaultFilter, err := filterHasMissingNestedInitialDefault(as.boundRowFilter, iceSchema)
 	if err != nil {
 		return err
+	}
+	if needsLogicalDefaultFilter {
+		iceSchema, err = fullPhysicalReadSchema(rdr, invariants)
+		if err != nil {
+			return err
+		}
+		colIndices = nil
+	}
+	if !needsLogicalDefaultFilter {
+		filterPlans, err = as.cachedFileFilterPlans(
+			iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	fields := append(iceSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
@@ -3093,7 +3167,33 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
 	}
 
-	filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
+	if needsLogicalDefaultFilter {
+		logicalSchema := as.filterSchema
+		if logicalSchema == nil {
+			logicalSchema = as.scanSchema
+		}
+		if logicalSchema == nil {
+			return fmt.Errorf("%w: missing logical schema for nested initial-default delete filter", iceberg.ErrInvalidSchema)
+		}
+		// Keep file_path and pos while applying defaults to the actual columns.
+		// Their positions are still needed to write the delete records.
+		logicalFields := append(logicalSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
+		logicalWithPos := iceberg.NewSchemaWithIdentifiers(logicalSchema.ID, logicalSchema.IdentifierFieldIDs(), logicalFields...)
+		physicalWithPos := enrichedIcebergSchema
+		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+			defer r.Release()
+
+			return ToRequestedSchema(ctx, logicalWithPos, physicalWithPos, r, SchemaOptions{
+				IncludeFieldIDs: true,
+				UseLargeTypes:   as.useLargeTypes,
+				TableProperties: invariants.tableProperties,
+			})
+		})
+		enrichedIcebergSchema = logicalWithPos
+		filterFunc, dropFile, err = as.getRecordFilter(ctx, logicalSchema, as.boundRowFilter)
+	} else {
+		filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
+	}
 	if err != nil {
 		return err
 	}
