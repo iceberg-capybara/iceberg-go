@@ -193,6 +193,10 @@ func (t DeletedRowsScanTask) ExistingDeletes() []iceberg.DataFile {
 }
 
 func fileScanTaskWithDeletes(dataFile iceberg.DataFile, deletes []iceberg.DataFile) (FileScanTask, error) {
+	if dataFile == nil {
+		return FileScanTask{}, fmt.Errorf("%w: changelog task has nil data file", ErrInvalidMetadata)
+	}
+
 	classified, err := classifyDeleteFiles(deletes)
 	if err != nil {
 		return FileScanTask{}, err
@@ -200,6 +204,8 @@ func fileScanTaskWithDeletes(dataFile iceberg.DataFile, deletes []iceberg.DataFi
 
 	return FileScanTask{
 		File:                dataFile,
+		Length:              dataFile.FileSizeBytes(),
+		FirstRowID:          dataFile.FirstRowID(),
 		DeleteFiles:         classified.pos,
 		EqualityDeleteFiles: classified.eq,
 		DeletionVectorFiles: classified.dv,
