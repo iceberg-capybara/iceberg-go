@@ -406,10 +406,6 @@ func (r *Registry) LoadFS(ctx context.Context, props map[string]string, location
 		return nil, err
 	}
 
-	if iofs == nil {
-		iofs = LocalFS{}
-	}
-
 	return iofs, nil
 }
 

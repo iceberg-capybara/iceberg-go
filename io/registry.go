@@ -190,5 +190,13 @@ func (r *Registry) inferFileIOFromScheme(ctx context.Context, path string, props
 		return nil, fmt.Errorf("%w for path %q (scheme: %s)", ErrIOSchemeNotFound, path, parsed.Scheme)
 	}
 
-	return factory(ctx, parsed, props)
+	iofs, err := factory(ctx, parsed, props)
+	if err != nil {
+		return nil, err
+	}
+	if iofs == nil {
+		return nil, fmt.Errorf("io: factory for scheme %q returned nil FileIO", parsed.Scheme)
+	}
+
+	return iofs, nil
 }

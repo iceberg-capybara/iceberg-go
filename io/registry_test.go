@@ -319,6 +319,33 @@ func TestRegistryPreservesFactoryErrors(t *testing.T) {
 	require.ErrorIs(t, err, want)
 }
 
+func TestRegistryRejectsNilFactoryResult(t *testing.T) {
+	t.Parallel()
+
+	reg := io.NewRegistry()
+	const scheme = "nil-io-result"
+	require.NoError(t, reg.Register(scheme, func(context.Context, *url.URL, map[string]string) (io.IO, error) {
+		return nil, nil
+	}))
+
+	loaded, err := reg.LoadFS(t.Context(), nil, scheme+"://bucket/path")
+	require.Nil(t, loaded)
+	require.ErrorContains(t, err, `factory for scheme "nil-io-result" returned nil FileIO`)
+
+	load := reg.LoadFSFunc(nil, scheme+"://bucket/path")
+	loaded, err = load(t.Context())
+	require.Nil(t, loaded)
+	require.ErrorContains(t, err, `factory for scheme "nil-io-result" returned nil FileIO`)
+
+	loaded, err = reg.LoadFS(t.Context(), nil, "file:///tmp/test")
+	require.NoError(t, err)
+	require.IsType(t, io.LocalFS{}, loaded)
+
+	loaded, err = reg.LoadFS(t.Context(), nil, "")
+	require.NoError(t, err)
+	require.IsType(t, io.LocalFS{}, loaded)
+}
+
 func TestRegistryLoadFSFuncUsesScopedFactories(t *testing.T) {
 	t.Parallel()
 
