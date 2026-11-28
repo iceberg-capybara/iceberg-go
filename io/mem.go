@@ -344,18 +344,43 @@ func (fi *memFileInfo) IsDir() bool        { return fi.isDir }
 func (fi *memFileInfo) Sys() any           { return nil }
 
 type memWriter struct {
-	fs   *MemFS
-	name string
-	ctx  context.Context
-	buf  bytes.Buffer
+	fs       *MemFS
+	name     string
+	ctx      context.Context
+	buf      bytes.Buffer
+	closed   bool
+	closeErr error
 }
 
-func (w *memWriter) Write(p []byte) (int, error)         { return w.buf.Write(p) }
-func (w *memWriter) ReadFrom(r io.Reader) (int64, error) { return w.buf.ReadFrom(r) }
+func (w *memWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, &fs.PathError{Op: "write", Path: w.name, Err: fs.ErrClosed}
+	}
+
+	return w.buf.Write(p)
+}
+
+func (w *memWriter) ReadFrom(r io.Reader) (int64, error) {
+	if w.closed {
+		return 0, &fs.PathError{Op: "readfrom", Path: w.name, Err: fs.ErrClosed}
+	}
+
+	return w.buf.ReadFrom(r)
+}
+
 func (w *memWriter) Close() error {
+	if w.closed {
+		return w.closeErr
+	}
+	w.closed = true
+
 	if err := w.ctx.Err(); err != nil {
+		w.closeErr = err
+
 		return err
 	}
 
-	return w.fs.WriteFile(w.ctx, w.name, w.buf.Bytes())
+	w.closeErr = w.fs.WriteFile(w.ctx, w.name, w.buf.Bytes())
+
+	return w.closeErr
 }
