@@ -776,6 +776,16 @@ func (bfs *fileIO) Rename(ctx context.Context, oldpath, newpath string) error {
 		return &fs.PathError{Op: "Rename", Path: newpath, Err: err}
 	}
 
+	// Two different URIs can resolve to the same object. Copying and then
+	// deleting that key would remove the object instead of renaming it.
+	if oldKey == newKey {
+		if _, err := bfs.Attributes(ctx, oldKey); err != nil {
+			return blobErrToFsErr("Rename", oldpath, err)
+		}
+
+		return nil
+	}
+
 	if err := bfs.Copy(ctx, newKey, oldKey, nil); err != nil {
 		return blobErrToFsErr("Rename", oldpath, err)
 	}

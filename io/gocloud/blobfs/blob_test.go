@@ -1182,6 +1182,54 @@ func TestBlobFileIORename(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestBlobFileIORenameSameObject(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name, oldPath, newPath string
+	}{
+		{"identical URI", "s3://test-bucket/data/source.parquet", "s3://test-bucket/data/source.parquet"},
+		{"S3 scheme alias", "s3://test-bucket/data/source.parquet", "s3a://test-bucket/data/source.parquet"},
+		{"URI and relative key", "s3://test-bucket/data/source.parquet", "data/source.parquet"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			bucket := memblob.OpenBucket(nil)
+			t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+
+			content := []byte("source")
+			require.NoError(t, bucket.WriteAll(ctx, "data/source.parquet", content, nil))
+			bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+			require.NoError(t, bfs.Rename(ctx, tt.oldPath, tt.newPath))
+
+			data, err := bucket.ReadAll(ctx, "data/source.parquet")
+			require.NoError(t, err)
+			assert.Equal(t, content, data)
+		})
+	}
+}
+
+func TestBlobFileIORenameSameMissingObject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	name := "s3://test-bucket/data/missing.parquet"
+	err := bfs.Rename(ctx, name, name)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "Rename", pathErr.Op)
+	assert.Equal(t, name, pathErr.Path)
+}
+
 func TestBlobFileIORenameUsesOperationContext(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)
