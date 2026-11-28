@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/iceberg-go/internal/schemes"
@@ -172,9 +174,17 @@ func schemeRegistrationHint(scheme string) string {
 }
 
 func (r *Registry) inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
-	parsed, err := url.Parse(path)
-	if err != nil {
-		return nil, err
+	// Pass native paths through unchanged so URL parsing does not consume
+	// literal percent escapes, question marks, or fragments.
+	parsed := &url.URL{Path: path}
+	colon := strings.IndexByte(path, ':')
+	separator := strings.IndexAny(path, `/\`)
+	if filepath.VolumeName(path) == "" && colon >= 0 && (separator < 0 || colon < separator) {
+		var err error
+		parsed, err = url.Parse(path)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	r.mu.RLock()
