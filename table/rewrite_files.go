@@ -312,6 +312,10 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
 func (r *RewriteFiles) Commit(ctx context.Context) error {
+	return r.commit(ctx)
+}
+
+func (r *RewriteFiles) commit(ctx context.Context, extraOpts ...WriteOption) error {
 	if r.committed {
 		return fmt.Errorf("%w: RewriteFiles.Commit already called on this builder", ErrInvalidOperation)
 	}
@@ -341,7 +345,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
-		r.snapshotProps, opts...); err != nil {
+		r.snapshotProps, append(opts, extraOpts...)...); err != nil {
 		return err
 	}
 

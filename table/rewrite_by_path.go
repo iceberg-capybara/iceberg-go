@@ -223,14 +223,9 @@ func (t *Transaction) StageRewrittenDataFilesByPath(
 		rewrite.AddDataFile(df)
 	}
 
-	if err := rewrite.Commit(ctx); err != nil {
-		return err
-	}
-
-	// A concurrent commit may reference a replacement path after planning.
-	// The rewrite validator checks source files and deletes, but not newly
-	// referenced replacement paths.
-	t.addValidator(func(cc *conflictContext) error {
+	// Path-based rewrites check concurrent additions in both data and delete
+	// manifests and report conflicts using ErrConflictingDataFiles.
+	validator := conflictValidatorFunc(func(cc *conflictContext) error {
 		if cc == nil {
 			return nil
 		}
@@ -254,7 +249,9 @@ func (t *Transaction) StageRewrittenDataFilesByPath(
 		return nil
 	})
 
-	return nil
+	return rewrite.commit(ctx, func(cfg *dataFileCfg) {
+		cfg.replacementPathValidator = &validator
+	})
 }
 
 // completePathRewriteMetricTotals sums only columns reported by every file.

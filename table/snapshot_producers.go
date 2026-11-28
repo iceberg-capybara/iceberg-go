@@ -1507,6 +1507,23 @@ func manifestPaths(ctx context.Context, fio iceio.IO, s *Snapshot) (map[string]s
 	return paths, nil
 }
 
+// trackReplacementPaths records the manifest paths already checked
+// while staging a replacement so a replay only scans new data manifests.
+func (sp *snapshotProducer) trackReplacementPaths(ctx context.Context, parent *Snapshot, paths map[string]struct{}) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	checked, err := manifestPaths(ctx, sp.io, parent)
+	if err != nil {
+		return err
+	}
+	sp.duplicateCheckPaths = paths
+	sp.checkedManifests = checked
+
+	return nil
+}
+
 // checkDuplicatePaths fails if a data file live on parent has a path in
 // duplicateCheckPaths. The retry rebuild calls it so that a path another writer
 // committed after this producer planned is not added a second time. Manifests
