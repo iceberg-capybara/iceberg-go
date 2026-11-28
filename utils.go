@@ -122,6 +122,27 @@ var lzseed = maphash.MakeSeed()
 
 type literalSet map[any]struct{ orig Literal }
 
+// Using distinct named types keeps byte-identical literals of different
+// Iceberg types from replacing one another in the interface-keyed map.
+// Geo keys also include the logical type because CRS and edge interpolation
+// are part of GeoLiteral.Equals.
+type (
+	binaryLiteralHash  uint64
+	fixedLiteralHash   uint64
+	variantLiteralHash uint64
+	geoLiteralHash     struct {
+		typ  string
+		hash uint64
+	}
+)
+
+func geoSetKey(v GeoLiteral) geoLiteralHash {
+	return geoLiteralHash{
+		typ:  v.Type().String(),
+		hash: maphash.Bytes(lzseed, v.Value()),
+	}
+}
+
 // variantKey hashes the metadata and value bytes that VariantLiteral.Equals
 // compares. It must hash exactly what Equals compares: if Equals changes (e.g.
 // to logical equality), this key has to change with it.
@@ -158,15 +179,15 @@ func newLiteralSet(vals ...Literal) Set[Literal] {
 func (l literalSet) addliteral(v Literal) {
 	switch v := v.(type) {
 	case FixedLiteral:
-		l[maphash.Bytes(lzseed, []byte(v))] = struct{ orig Literal }{v}
+		l[fixedLiteralHash(maphash.Bytes(lzseed, []byte(v)))] = struct{ orig Literal }{v}
 	case BinaryLiteral:
-		l[maphash.Bytes(lzseed, []byte(v))] = struct{ orig Literal }{v}
+		l[binaryLiteralHash(maphash.Bytes(lzseed, []byte(v)))] = struct{ orig Literal }{v}
 	case GeoLiteral:
 		// GeoLiteral holds a []byte, so it cannot be used as a map key directly.
-		l[maphash.Bytes(lzseed, v.Value())] = struct{ orig Literal }{v}
+		l[geoSetKey(v)] = struct{ orig Literal }{v}
 	case VariantLiteral:
 		// VariantLiteral holds []byte buffers, so it cannot be used as a map key directly.
-		l[variantKey(v)] = struct{ orig Literal }{v}
+		l[variantLiteralHash(variantKey(v))] = struct{ orig Literal }{v}
 	default:
 		l[v] = struct{ orig Literal }{}
 	}
@@ -181,28 +202,28 @@ func (l literalSet) Add(lits ...Literal) {
 func (l literalSet) Contains(lit Literal) bool {
 	switch lit := lit.(type) {
 	case BinaryLiteral:
-		v, ok := l[maphash.Bytes(lzseed, []byte(lit))]
+		v, ok := l[binaryLiteralHash(maphash.Bytes(lzseed, []byte(lit)))]
 		if !ok {
 			return false
 		}
 
 		return lit.Equals(v.orig)
 	case FixedLiteral:
-		v, ok := l[maphash.Bytes(lzseed, []byte(lit))]
+		v, ok := l[fixedLiteralHash(maphash.Bytes(lzseed, []byte(lit)))]
 		if !ok {
 			return false
 		}
 
 		return lit.Equals(v.orig)
 	case GeoLiteral:
-		v, ok := l[maphash.Bytes(lzseed, lit.Value())]
+		v, ok := l[geoSetKey(lit)]
 		if !ok {
 			return false
 		}
 
 		return lit.Equals(v.orig)
 	case VariantLiteral:
-		v, ok := l[variantKey(lit)]
+		v, ok := l[variantLiteralHash(variantKey(lit))]
 		if !ok {
 			return false
 		}

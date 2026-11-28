@@ -80,3 +80,42 @@ func TestLiteralSetVariant(t *testing.T) {
 		assert.True(t, set.Contains(VariantLiteral(right)))
 	})
 }
+
+func TestLiteralSetKeepsDifferentByteLiteralTypes(t *testing.T) {
+	// These four literals have identical payloads, but Equals distinguishes
+	// binary, fixed, geometry and geography values.
+	payload := []byte("1234567890abcdef")
+	geometry, err := LiteralFromBytes(GeometryType{}, payload)
+	require.NoError(t, err)
+	geography, err := LiteralFromBytes(GeographyType{}, payload)
+	require.NoError(t, err)
+
+	binary := BinaryLiteral(payload)
+	fixed := FixedLiteral(payload)
+	literals := []Literal{binary, fixed, geometry, geography}
+
+	set := newLiteralSet(literals...)
+	require.Equal(t, len(literals), set.Len())
+	for _, literal := range literals {
+		assert.True(t, set.Contains(literal), "missing %T", literal)
+	}
+	assert.ElementsMatch(t, literals, set.Members())
+
+	var all []Literal
+	assert.True(t, set.All(func(literal Literal) bool {
+		all = append(all, literal)
+
+		return true
+	}))
+	assert.ElementsMatch(t, literals, all)
+	assert.True(t, set.Equals(newLiteralSet(geography, geometry, fixed, binary)))
+
+	// Appending another type with identical bytes must not overwrite the
+	// binary value or make an existing member disappear.
+	incremental := newLiteralSet(binary)
+	incremental.Add(fixed, geometry, geography)
+	assert.Equal(t, len(literals), incremental.Len())
+	assert.True(t, incremental.Equals(set))
+	assert.False(t, newLiteralSet(binary).Contains(fixed))
+	assert.False(t, newLiteralSet(geometry).Contains(geography))
+}
