@@ -392,6 +392,10 @@ func GetUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 		updated      = make([]string, 0, len(updates))
 	)
 
+	if updatedProps == nil && len(updates) > 0 {
+		updatedProps = make(iceberg.Properties, len(updates))
+	}
+
 	for _, key := range removals {
 		if _, exists := updatedProps[key]; exists {
 			delete(updatedProps, key)
@@ -400,7 +404,7 @@ func GetUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 	}
 
 	for key, value := range updates {
-		if updatedProps[key] != value {
+		if previous, exists := updatedProps[key]; !exists || previous != value {
 			updated = append(updated, key)
 			updatedProps[key] = value
 		}
